@@ -26,9 +26,31 @@ type APIError struct {
 func (e *APIError) Error() string { return e.Message }
 
 type Monitor struct {
-	ID        int64     `json:"id"`
-	URL       string    `json:"url"`
-	CreatedAt time.Time `json:"created_at"`
+	ID              int64     `json:"id"`
+	URL             string    `json:"url"`
+	Name            string    `json:"name"`
+	Method          string    `json:"method"`
+	IntervalSeconds int       `json:"interval_seconds"`
+	TimeoutSeconds  int       `json:"timeout_seconds"`
+	ExpectedStatus  *int      `json:"expected_status"`
+	Paused          bool      `json:"paused"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// Label is the name if set, otherwise the URL.
+func (m Monitor) Label() string {
+	if m.Name != "" {
+		return m.Name
+	}
+	return m.URL
+}
+
+// Bucket is one time slot of the latency chart.
+type Bucket struct {
+	Time         time.Time `json:"time"`
+	Checks       int64     `json:"checks"`
+	Down         int64     `json:"down"`
+	AvgLatencyMS *float64  `json:"avg_latency_ms"`
 }
 
 type Result struct {
@@ -73,9 +95,16 @@ func (c *Client) GetMonitor(ctx context.Context, id int64) (Monitor, error) {
 	return m, c.do(ctx, http.MethodGet, "/monitors/"+itoa(id), nil, &m)
 }
 
-func (c *Client) CreateMonitor(ctx context.Context, monitorURL string) (Monitor, error) {
+// CreateMonitor sends the given fields; the API fills in defaults for the rest.
+func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Monitor, error) {
 	var m Monitor
-	return m, c.do(ctx, http.MethodPost, "/monitors", map[string]string{"url": monitorURL}, &m)
+	return m, c.do(ctx, http.MethodPost, "/monitors", fields, &m)
+}
+
+// UpdateMonitor changes only the given fields (a nil value sends JSON null).
+func (c *Client) UpdateMonitor(ctx context.Context, id int64, fields map[string]any) (Monitor, error) {
+	var m Monitor
+	return m, c.do(ctx, http.MethodPatch, "/monitors/"+itoa(id), fields, &m)
 }
 
 func (c *Client) DeleteMonitor(ctx context.Context, id int64) error {
@@ -96,6 +125,16 @@ func (c *Client) Stats(ctx context.Context, id int64, window time.Duration) (Sta
 	path := "/monitors/" + itoa(id) + "/stats?window=" + url.QueryEscape(window.String())
 	err := c.do(ctx, http.MethodGet, path, nil, &body)
 	return body.Stats, err
+}
+
+func (c *Client) Latency(ctx context.Context, id int64, window, bucket time.Duration) ([]Bucket, error) {
+	var body struct {
+		Buckets []Bucket `json:"buckets"`
+	}
+	path := "/monitors/" + itoa(id) + "/latency?window=" + url.QueryEscape(window.String()) +
+		"&bucket=" + url.QueryEscape(bucket.String())
+	err := c.do(ctx, http.MethodGet, path, nil, &body)
+	return body.Buckets, err
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {

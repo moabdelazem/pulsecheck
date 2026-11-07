@@ -38,6 +38,7 @@ docker compose up --build     # postgres, schema, api, checker, dashboard
 | Dashboard | http://localhost:13000 |
 | API | http://localhost:18080 |
 | Postgres | `localhost:15432` |
+| Checker health and metrics | http://localhost:19090/metrics |
 
 The ports are fixed in [`compose.yml`](compose.yml) and chosen to avoid common
 defaults. The `migrate` service applies [`scripts/dev/schema.sql`](scripts/dev/schema.sql)
@@ -124,8 +125,21 @@ docker run --network host -e DATABASE_URL="$DB" pulsecheck-checker
 docker run --network host -e API_URL=http://localhost:8080 pulsecheck-dashboard
 ```
 
+## Health, metrics and data retention
+
+Each app has `/livez` (process is alive), `/healthz` (its dependency is reachable
+too) and `/metrics` (Prometheus format). The API and dashboard serve them on their
+normal port; the checker has a small server on `:9090` just for these. Details in
+each app's README.
+
+The checker deletes check results older than `RETENTION` (default `720h`, 30 days)
+once an hour.
+
 ## Status
 
-Work in progress. Not done yet: authentication (API and dashboard), Kubernetes
-manifests for GitOps, docker compose, per-monitor check intervals, cleanup of old
-results, and running more than one checker safely.
+Work in progress. Done: monitors with per-monitor interval, timeout, method and
+expected status, pause/resume, names, uptime stats, a response-time chart, deleting
+old results, and health and metrics endpoints.
+
+Not done yet: authentication (API and dashboard), alerts, Kubernetes manifests for
+GitOps, and running more than one checker safely.

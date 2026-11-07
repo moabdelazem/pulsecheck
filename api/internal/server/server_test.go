@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +13,35 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/moabdelazem/pulsecheck-api/internal/store"
 )
+
+func TestValidateSettings(t *testing.T) {
+	ok := store.DefaultSettings()
+	ok.URL = "https://example.com"
+	if err := validateSettings(ok); err != nil {
+		t.Fatalf("defaults should be valid: %v", err)
+	}
+	status := func(n int) *int { return &n }
+	bad := map[string]func(*store.Settings){
+		"long name":      func(s *store.Settings) { s.Name = strings.Repeat("é", 101) },
+		"POST method":    func(s *store.Settings) { s.Method = "POST" },
+		"interval low":   func(s *store.Settings) { s.IntervalSeconds = 9 },
+		"interval high":  func(s *store.Settings) { s.IntervalSeconds = 86401 },
+		"timeout zero":   func(s *store.Settings) { s.TimeoutSeconds = 0 },
+		"timeout high":   func(s *store.Settings) { s.TimeoutSeconds = 31 },
+		"status too low": func(s *store.Settings) { s.ExpectedStatus = status(99) },
+		"status too big": func(s *store.Settings) { s.ExpectedStatus = status(600) },
+	}
+	for name, mutate := range bad {
+		s := ok
+		mutate(&s)
+		if validateSettings(s) == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
 
 func TestValidateURL(t *testing.T) {
 	good := []string{"https://example.com", "http://localhost:8080/health"}
@@ -40,7 +69,7 @@ func TestAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(db.Close) // registered first, so it runs after the cleanups below
 
 	srv := httptest.NewServer(New(db))
 	defer srv.Close()
@@ -73,18 +102,26 @@ func TestAPI(t *testing.T) {
 	}
 
 	type monitor struct {
-		ID  int64  `json:"id"`
-		URL string `json:"url"`
+		ID              int64  `json:"id"`
+		URL             string `json:"url"`
+		Name            string `json:"name"`
+		Method          string `json:"method"`
+		IntervalSeconds int    `json:"interval_seconds"`
+		TimeoutSeconds  int    `json:"timeout_seconds"`
+		ExpectedStatus  *int   `json:"expected_status"`
+		Paused          bool   `json:"paused"`
 	}
 
 	call("GET", "/healthz", "", 200, nil)
+	call("GET", "/livez", "", 200, nil)
 
 	// Create, plus the ways create can fail.
 	var m monitor
 	call("POST", "/monitors", `{"url":"`+url1+`"}`, 201, &m)
-	if m.ID == 0 || m.URL != url1 {
-		t.Fatalf("created %+v", m)
+	if m.ID == 0 || m.URL != url1 || m.Method != "GET" || m.IntervalSeconds != 30 || m.TimeoutSeconds != 5 || m.ExpectedStatus != nil || m.Paused {
+		t.Fatalf("created with defaults: %+v", m)
 	}
+	call("POST", "/monitors", `{"url":"`+url2+`","interval_seconds":5}`, 400, nil)
 	call("POST", "/monitors", `{"url":"`+url1+`"}`, 409, nil)
 	call("POST", "/monitors", `{"url":"not a url"}`, 400, nil)
 	call("POST", "/monitors", `{"url":"`+url2+`","extra":1}`, 400, nil)
@@ -94,14 +131,14 @@ func TestAPI(t *testing.T) {
 	id := fmt.Sprint(m.ID)
 	var got monitor
 	call("GET", "/monitors/"+id, "", 200, &got)
-	if got != m {
+	if got.ID != m.ID || got.URL != m.URL {
 		t.Fatalf("get = %+v, want %+v", got, m)
 	}
 	var list []monitor
 	call("GET", "/monitors", "", 200, &list)
 	found := false
 	for _, x := range list {
-		found = found || x == m
+		found = found || x.ID == m.ID
 	}
 	if !found {
 		t.Fatalf("monitor %+v missing from list", m)
@@ -109,11 +146,22 @@ func TestAPI(t *testing.T) {
 	call("GET", "/monitors/abc", "", 400, nil)
 	call("GET", "/monitors/999999999999", "", 404, nil)
 
-	// Update.
-	call("PUT", "/monitors/"+id, `{"url":"`+url2+`"}`, 200, &got)
-	if got.URL != url2 {
-		t.Fatalf("updated url = %q, want %q", got.URL, url2)
+	// Update: PATCH changes only the fields sent.
+	call("PATCH", "/monitors/"+id, `{"url":"`+url2+`","name":"  Example  ","method":"head","interval_seconds":60,"expected_status":204}`, 200, &got)
+	if got.URL != url2 || got.Name != "Example" || got.Method != "HEAD" || got.IntervalSeconds != 60 ||
+		got.ExpectedStatus == nil || *got.ExpectedStatus != 204 || got.TimeoutSeconds != 5 {
+		t.Fatalf("after patch: %+v", got)
 	}
+	call("PATCH", "/monitors/"+id, `{"paused":true}`, 200, &got)
+	if !got.Paused || got.Name != "Example" || got.IntervalSeconds != 60 {
+		t.Fatalf("pause changed other fields: %+v", got)
+	}
+	call("PATCH", "/monitors/"+id, `{"expected_status":null,"paused":false}`, 200, &got)
+	if got.ExpectedStatus != nil || got.Paused {
+		t.Fatalf("clear expected_status / resume: %+v", got)
+	}
+	call("PATCH", "/monitors/"+id, `{"timeout_seconds":99}`, 400, nil)
+	call("PATCH", "/monitors/999999999999", `{"paused":true}`, 404, nil)
 
 	// Results and stats: empty first, then with two recorded checks.
 	var results []map[string]any
@@ -147,9 +195,53 @@ func TestAPI(t *testing.T) {
 	}
 	call("GET", "/monitors/"+id+"/stats?window=nope", "", 400, nil)
 
+	// Latency buckets: both checks fall in one 1h bucket; only the up check counts for latency.
+	var lat struct {
+		Buckets []struct {
+			Checks       int64    `json:"checks"`
+			Down         int64    `json:"down"`
+			AvgLatencyMS *float64 `json:"avg_latency_ms"`
+		} `json:"buckets"`
+	}
+	call("GET", "/monitors/"+id+"/latency?window=2h&bucket=1m", "", 200, &lat)
+	var checks, down int64
+	for _, b := range lat.Buckets {
+		checks += b.Checks
+		down += b.Down
+		if b.Down == b.Checks && b.AvgLatencyMS != nil {
+			t.Errorf("all-down bucket should have null latency: %+v", b)
+		}
+	}
+	if checks != 2 || down != 1 {
+		t.Fatalf("latency buckets: %d checks, %d down, want 2 and 1 (%+v)", checks, down, lat.Buckets)
+	}
+	call("GET", "/monitors/"+id+"/latency?window=720h&bucket=10s", "", 400, nil)
+	call("GET", "/monitors/"+id+"/latency?bucket=1s", "", 400, nil)
+
 	// Delete.
 	call("DELETE", "/monitors/"+id, "", 204, nil)
 	call("GET", "/monitors/"+id, "", 404, nil)
 	call("DELETE", "/monitors/"+id, "", 404, nil)
 	call("GET", "/monitors/"+id+"/results", "", 404, nil)
+
+	// Metrics: labelled by route pattern, not by the raw path with the id in it.
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{
+		`http_requests_total{code="201",route="POST /monitors"}`,
+		`http_requests_total{code="404",route="GET /monitors/{id}"}`,
+		`http_request_duration_seconds_bucket{route="GET /healthz"`,
+		"go_goroutines",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if strings.Contains(string(body), "/monitors/"+id) {
+		t.Error("metrics contain a raw monitor id path")
+	}
 }

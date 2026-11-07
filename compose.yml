@@ -6,6 +6,7 @@
 #   dashboard  http://localhost:13000
 #   api        http://localhost:18080
 #   postgres   localhost:15432
+#   checker    http://localhost:19090/metrics  (health and metrics only)
 
 name: pulsecheck
 
@@ -53,8 +54,10 @@ services:
     image: pulsecheck-checker
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
-      CHECK_INTERVAL: ${CHECK_INTERVAL:-30s}
-      CHECK_TIMEOUT: ${CHECK_TIMEOUT:-5s}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5s}
+      RETENTION: ${RETENTION:-720h}
+    ports:
+      - "19090:9090"
     depends_on:
       migrate:
         condition: service_completed_successfully

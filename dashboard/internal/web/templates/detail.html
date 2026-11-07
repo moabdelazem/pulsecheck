@@ -1,15 +1,26 @@
 {{define "content"}}
 <p><a href="/">← All monitors</a></p>
 {{if .Monitor.ID}}
+{{$m := .Monitor}}
 <div class="row">
-  <h1>{{.Monitor.URL}}</h1>
-  <form method="post" action="/monitors/{{.Monitor.ID}}/delete" onsubmit="return confirm('Delete this monitor and all its results?')">
-    <button class="danger" type="submit">Delete monitor</button>
-  </form>
+  <div>
+    <h1 style="margin-bottom: 4px">{{$m.Label}}</h1>
+    {{if $m.Name}}<p class="muted" style="margin: 0 0 8px; overflow-wrap: anywhere">{{$m.URL}}</p>{{end}}
+  </div>
+  <div class="actions">
+    <form method="post" action="/monitors/{{$m.ID}}/{{if $m.Paused}}resume{{else}}pause{{end}}">
+      <button class="quiet" type="submit">{{if $m.Paused}}Resume checks{{else}}Pause checks{{end}}</button>
+    </form>
+    <form method="post" action="/monitors/{{$m.ID}}/delete" onsubmit="return confirm('Delete this monitor and all its results?')">
+      <button class="danger" type="submit">Delete monitor</button>
+    </form>
+  </div>
 </div>
 <p class="muted">
-  {{if .Results}}{{template "status" index .Results 0}} · last checked {{ago (index .Results 0).CheckedAt}}{{else}}<span class="pill wait">Pending</span>{{end}}
-  · <a href="{{.Monitor.URL}}" rel="noopener noreferrer" target="_blank">open site</a>
+  {{if .Results}}{{pill $m.Paused (index .Results 0)}} · last checked {{ago (index .Results 0).CheckedAt}}{{else}}{{pill $m.Paused nil}}{{end}}
+  · {{$m.Method}} every {{every $m.IntervalSeconds}}, timeout {{$m.TimeoutSeconds}}s,
+  expects {{with $m.ExpectedStatus}}{{.}}{{else}}any 2xx/3xx{{end}}
+  · <a href="{{$m.URL}}" rel="noopener noreferrer" target="_blank">open site</a>
 </p>
 
 <div class="cards">
@@ -19,12 +30,55 @@
   <div class="card stat"><span class="muted">Checks 24h</span><b>{{.Day.Checks}}</b></div>
 </div>
 
+<div class="card chart-card">
+  <div class="row">
+    <h2>Response time <span class="muted" style="font-weight: 400">· average per {{.Range.Per}}</span></h2>
+    <nav class="tabs" aria-label="Time range">
+      {{range ranges}}<a href="?range={{.Key}}"{{if eq .Key $.Range.Key}} aria-current="page"{{end}}>{{.Key}}</a>{{end}}
+    </nav>
+  </div>
+  {{with .Chart}}
+  {{if .Empty}}
+    <p class="empty muted">No checks in the last {{$.Range.Key}}.</p>
+  {{else}}
+  <div class="chart-wrap">
+    <svg class="chart" viewBox="0 0 {{.W}} {{.H}}" role="img" aria-label="{{.Summary}}">
+      {{range .Slots}}{{if .Down}}<rect class="down-band" x="{{printf "%.1f" .X}}" y="{{$.Chart.Top}}" width="{{printf "%.1f" .W}}" height="{{sub $.Chart.Bottom $.Chart.Top}}"/>{{end}}{{end}}
+      {{range .YTicks}}
+      <line class="grid" x1="{{$.Chart.Left}}" x2="{{$.Chart.Right}}" y1="{{printf "%.1f" .Pos}}" y2="{{printf "%.1f" .Pos}}"/>
+      <text class="axis" x="{{sub $.Chart.Left 8}}" y="{{printf "%.1f" .Pos}}" dy="0.32em" text-anchor="end">{{.Label}}</text>
+      {{end}}
+      <path class="line" d="{{.Path}}"/>
+      {{range .XTicks}}<text class="axis" x="{{printf "%.1f" .Pos}}" y="{{sub $.Chart.H 6}}" text-anchor="{{.Anchor}}">{{.Label}}</text>{{end}}
+      {{range .Slots}}<rect class="hit" x="{{printf "%.1f" .X}}" y="{{$.Chart.Top}}" width="{{printf "%.1f" .W}}" height="{{sub $.Chart.Bottom $.Chart.Top}}"><title>{{.Label}}</title></rect>{{end}}
+    </svg>
+  </div>
+  {{if .HasDown}}<p class="key"><span class="swatch"></span>Time slots with at least one failed check</p>{{end}}
+  {{end}}
+  {{end}}
+</div>
+
 {{if .Strip}}
 <h2>Last {{len .Strip}} checks <span class="muted">(oldest → newest)</span></h2>
 <div class="card strip" role="img" aria-label="{{.Day.UpChecks}} of {{.Day.Checks}} checks up in the last 24 hours">
   {{range .Strip}}<span class="{{if .Up}}up{{else}}down{{end}}" title="{{.CheckedAt.Format "Jan 2 15:04:05"}}: {{if .Up}}up{{else}}down{{end}}"></span>{{end}}
 </div>
 {{end}}
+
+<h2>Settings</h2>
+<form class="card settings" method="post" action="/monitors/{{$m.ID}}/settings">
+  <label>Name<input name="name" maxlength="100" value="{{$m.Name}}" placeholder="Optional"></label>
+  <label>Method
+    <select name="method">
+      <option{{if eq $m.Method "GET"}} selected{{end}}>GET</option>
+      <option{{if eq $m.Method "HEAD"}} selected{{end}}>HEAD</option>
+    </select>
+  </label>
+  <label>Check every (seconds)<input name="interval_seconds" type="number" min="10" max="86400" required value="{{$m.IntervalSeconds}}"></label>
+  <label>Timeout (seconds)<input name="timeout_seconds" type="number" min="1" max="30" required value="{{$m.TimeoutSeconds}}"></label>
+  <label>Expected status<input name="expected_status" type="number" min="100" max="599" value="{{with $m.ExpectedStatus}}{{.}}{{end}}" placeholder="Any 2xx/3xx"></label>
+  <button type="submit">Save settings</button>
+</form>
 
 <h2>Recent checks</h2>
 <div class="card table-wrap">
@@ -35,7 +89,7 @@
     {{range .Results}}
       <tr>
         <td class="num">{{.CheckedAt.Format "Jan 2 15:04:05"}}</td>
-        <td>{{template "status" .}}</td>
+        <td>{{if .Up}}<span class="pill up">Up</span>{{else}}<span class="pill down">Down</span>{{end}}</td>
         <td class="num">{{with .StatusCode}}{{.}}{{else}}<span class="muted">–</span>{{end}}</td>
         <td class="num">{{.LatencyMS}} ms</td>
         <td class="url muted">{{with .Error}}{{.}}{{end}}</td>
@@ -44,7 +98,7 @@
     </tbody>
   </table>
 {{else}}
-  <p class="empty muted">No checks yet. The checker will run this monitor on its next round.</p>
+  <p class="empty muted">No checks yet.{{if not $m.Paused}} The checker will run this monitor within a few seconds.{{end}}</p>
 {{end}}
 </div>
 {{end}}

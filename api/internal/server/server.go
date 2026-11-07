@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/moabdelazem/pulsecheck-api/internal/store"
 )
@@ -23,15 +26,24 @@ type server struct {
 func New(db *pgxpool.Pool) http.Handler {
 	s := &server{db: db}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", live)
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /monitors", s.listMonitors)
 	mux.HandleFunc("POST /monitors", s.createMonitor)
 	mux.HandleFunc("GET /monitors/{id}", s.getMonitor)
-	mux.HandleFunc("PUT /monitors/{id}", s.updateMonitor)
+	mux.HandleFunc("PATCH /monitors/{id}", s.updateMonitor)
 	mux.HandleFunc("DELETE /monitors/{id}", s.deleteMonitor)
 	mux.HandleFunc("GET /monitors/{id}/results", s.listResults)
 	mux.HandleFunc("GET /monitors/{id}/stats", s.stats)
-	return mux
+	mux.HandleFunc("GET /monitors/{id}/latency", s.latency)
+	return instrument(mux)
+}
+
+// live only says the process is serving; it does not touch the database, so a
+// database outage does not get the API restarted.
+func live(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
@@ -51,12 +63,13 @@ func (s *server) listMonitors(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, monitors)
 }
 
+// POST /monitors: only "url" is required, other settings get their defaults.
 func (s *server) createMonitor(w http.ResponseWriter, r *http.Request) {
-	u, ok := readURL(w, r)
-	if !ok {
+	in := store.DefaultSettings()
+	if !readSettings(w, r, &in) {
 		return
 	}
-	m, err := store.CreateMonitor(r.Context(), s.db, u)
+	m, err := store.CreateMonitor(r.Context(), s.db, in)
 	if err != nil {
 		s.storeError(w, err)
 		return
@@ -77,16 +90,23 @@ func (s *server) getMonitor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
+// PATCH /monitors/{id}: fields left out keep their value; "expected_status": null clears it.
 func (s *server) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
-	u, ok := readURL(w, r)
-	if !ok {
+	cur, err := store.GetMonitor(r.Context(), s.db, id)
+	if err != nil {
+		s.storeError(w, err)
 		return
 	}
-	m, err := store.UpdateMonitor(r.Context(), s.db, id, u)
+	// shortcut: read-modify-write, two PATCHes at the same moment can overwrite each other.
+	in := cur.Settings
+	if !readSettings(w, r, &in) {
+		return
+	}
+	m, err := store.UpdateMonitor(r.Context(), s.db, id, in)
 	if err != nil {
 		s.storeError(w, err)
 		return
@@ -160,6 +180,46 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"window": window.String(), "stats": st})
 }
 
+// GET /monitors/{id}/latency?window=24h&bucket=15m (at most 1000 buckets)
+func (s *server) latency(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	window, bucket := 24*time.Hour, 15*time.Minute
+	q := r.URL.Query()
+	if v := q.Get("window"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 || d > 90*24*time.Hour {
+			writeError(w, http.StatusBadRequest, `window must be a duration like "1h" or "720h" (max 2160h)`)
+			return
+		}
+		window = d
+	}
+	if v := q.Get("bucket"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 10*time.Second {
+			writeError(w, http.StatusBadRequest, `bucket must be a duration of at least "10s"`)
+			return
+		}
+		bucket = d
+	}
+	if window/bucket > 1000 {
+		writeError(w, http.StatusBadRequest, "window / bucket must be at most 1000 buckets")
+		return
+	}
+	if _, err := store.GetMonitor(r.Context(), s.db, id); err != nil {
+		s.storeError(w, err)
+		return
+	}
+	buckets, err := store.LatencyBuckets(r.Context(), s.db, id, time.Now().Add(-window), bucket)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"window": window.String(), "bucket": bucket.String(), "buckets": buckets})
+}
+
 // storeError turns store errors into HTTP responses; unknown errors are logged, not shown.
 func (s *server) storeError(w http.ResponseWriter, err error) {
 	switch {
@@ -182,22 +242,42 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return id, true
 }
 
-// readURL decodes {"url": "..."} and checks it is an absolute http(s) URL.
-func readURL(w http.ResponseWriter, r *http.Request) (string, bool) {
-	var body struct {
-		URL string `json:"url"`
-	}
+// readSettings decodes the JSON body on top of s (fields not sent stay as they are)
+// and validates the result.
+func readSettings(w http.ResponseWriter, r *http.Request, s *store.Settings) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, `body must be JSON like {"url": "https://example.com"}`)
-		return "", false
+	if err := dec.Decode(s); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
 	}
-	if err := validateURL(body.URL); err != nil {
+	s.Name = strings.TrimSpace(s.Name)
+	s.Method = strings.ToUpper(s.Method)
+	if err := validateSettings(*s); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return "", false
+		return false
 	}
-	return body.URL, true
+	return true
+}
+
+// Limits match the CHECK constraints in scripts/dev/schema.sql.
+func validateSettings(s store.Settings) error {
+	if err := validateURL(s.URL); err != nil {
+		return err
+	}
+	switch {
+	case utf8.RuneCountInString(s.Name) > 100:
+		return errors.New("name is too long (max 100 characters)")
+	case s.Method != "GET" && s.Method != "HEAD":
+		return errors.New(`method must be "GET" or "HEAD"`)
+	case s.IntervalSeconds < 10 || s.IntervalSeconds > 86400:
+		return errors.New("interval_seconds must be between 10 and 86400")
+	case s.TimeoutSeconds < 1 || s.TimeoutSeconds > 30:
+		return errors.New("timeout_seconds must be between 1 and 30")
+	case s.ExpectedStatus != nil && (*s.ExpectedStatus < 100 || *s.ExpectedStatus > 599):
+		return errors.New("expected_status must be between 100 and 599, or null for any 2xx/3xx")
+	}
+	return nil
 }
 
 func validateURL(s string) error {
