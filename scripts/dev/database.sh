@@ -30,4 +30,13 @@ docker run -d \
     -e POSTGRES_PASSWORD="postgres_dev_password" \
     "$POSTGRES_IMAGE:$POSTGRES_TAG"
 
+echo "Waiting for PostgreSQL to accept connections..."
+until docker exec "$CONTAINER_NAME" pg_isready -h 127.0.0.1 -U postgres &>/dev/null; do
+    sleep 1
+done
+
+echo "Applying schema..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+docker exec -i "$CONTAINER_NAME" psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 < "$SCRIPT_DIR/schema.sql"
+
 echo "PostgreSQL is running on port 5432."
