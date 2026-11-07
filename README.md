@@ -73,9 +73,30 @@ make fmt     # go fmt
 make vet     # go vet
 make tidy    # go mod tidy
 make clean   # remove bin/
+make docker  # build the Docker image pulsecheck-<app>
+```
+
+## Docker
+
+Each app has a multi-stage `Dockerfile`: a static Go binary on a distroless,
+non-root base image (~21 MB). Build from inside the app folder so its
+`.dockerignore` applies:
+
+```sh
+cd api && make docker        # -> pulsecheck-api
+cd checker && make docker    # -> pulsecheck-checker
+```
+
+Run them against the dev database. Inside a container `localhost` is the container
+itself, so use the host network (Linux):
+
+```sh
+DB='postgres://postgres:postgres_dev_password@localhost:5432/postgres?sslmode=disable'
+docker run --network host -e DATABASE_URL="$DB" pulsecheck-api
+docker run --network host -e DATABASE_URL="$DB" pulsecheck-checker
 ```
 
 ## Status
 
-Work in progress. Not done yet: authentication, Dockerfiles, per-monitor check
+Work in progress. Not done yet: authentication, docker compose, per-monitor check
 intervals, cleanup of old results, and running more than one checker safely.
