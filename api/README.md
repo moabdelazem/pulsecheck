@@ -10,6 +10,16 @@ the Postgres database that the [checker](../checker/) fills with results.
 make run                     # listens on :8080
 ```
 
+## Docker
+
+```sh
+make docker   # builds pulsecheck-api from ./Dockerfile
+docker run --network host -e DATABASE_URL='postgres://postgres:postgres_dev_password@localhost:5432/postgres?sslmode=disable' pulsecheck-api
+```
+
+`--network host` lets the container reach the dev database on `localhost` (Linux).
+Against a database on another host, drop it and pass that `DATABASE_URL` and `-p 8080:8080`.
+
 ## Configuration
 
 | Variable | Default | Description |

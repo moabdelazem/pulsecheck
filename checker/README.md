@@ -23,6 +23,16 @@ were cut short.
 make run
 ```
 
+## Docker
+
+```sh
+make docker   # builds pulsecheck-checker from ./Dockerfile
+docker run --network host -e DATABASE_URL='postgres://postgres:postgres_dev_password@localhost:5432/postgres?sslmode=disable' pulsecheck-checker
+```
+
+`--network host` lets the container reach the dev database on `localhost` (Linux).
+Against a database on another host, drop it and pass that `DATABASE_URL`.
+
 ## Configuration
 
 | Variable | Default | Description |

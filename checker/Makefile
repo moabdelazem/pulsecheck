@@ -5,7 +5,7 @@ BIN := bin/$(APP)
 DATABASE_URL ?= postgres://postgres:postgres_dev_password@localhost:5432/postgres?sslmode=disable
 export DATABASE_URL
 
-.PHONY: run build test fmt vet tidy clean
+.PHONY: run build test fmt vet tidy clean docker
 
 run:
 	go run ./cmd/$(APP)
@@ -27,3 +27,6 @@ tidy:
 
 clean:
 	rm -rf bin
+
+docker:
+	docker build -t pulsecheck-$(APP) .
