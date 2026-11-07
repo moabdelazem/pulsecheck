@@ -24,7 +24,27 @@ built and deployed on its own.
 | [`dashboard/`](dashboard/) | Web UI: status, uptime, latency, recent checks; add and delete monitors | [dashboard/README.md](dashboard/README.md) |
 | [`scripts/dev/`](scripts/dev/) | Dev Postgres container and the database schema | below |
 
-## Quick start
+## Quick start (Docker Compose)
+
+Requirements: Docker.
+
+```sh
+cp .env.example .env          # once; database settings live here
+docker compose up --build     # postgres, schema, api, checker, dashboard
+```
+
+| Service | URL |
+|---|---|
+| Dashboard | http://localhost:13000 |
+| API | http://localhost:18080 |
+| Postgres | `localhost:15432` |
+
+The ports are fixed in [`compose.yml`](compose.yml) and chosen to avoid common
+defaults. The `migrate` service applies [`scripts/dev/schema.sql`](scripts/dev/schema.sql)
+on every start, then exits. Data is kept in the `pulsecheck_pgdata` volume;
+`docker compose down -v` deletes it.
+
+## Quick start (without Docker for the apps)
 
 Requirements: Go 1.26+, Docker.
 
