@@ -1,0 +1,43 @@
+{{define "content"}}
+<h1>Monitors</h1>
+
+<div class="cards">
+  <div class="card stat"><span class="muted">Monitors</span><b>{{len .Rows}}</b></div>
+  <div class="card stat"><span class="muted">Up</span><b style="color: var(--up)">{{.Up}}</b></div>
+  <div class="card stat"><span class="muted">Down</span><b style="color: var(--down)">{{.Down}}</b></div>
+  <div class="card stat"><span class="muted">Pending</span><b>{{.Wait}}</b></div>
+</div>
+
+<form class="add" method="post" action="/monitors">
+  <label for="url" class="muted" style="flex-basis: 100%">Add a URL to monitor</label>
+  <input id="url" name="url" type="url" required placeholder="https://example.com">
+  <button type="submit">Add monitor</button>
+</form>
+
+<div class="card table-wrap">
+{{if .Rows}}
+  <table>
+    <thead><tr><th>Status</th><th>URL</th><th>Uptime 24h</th><th>Avg latency 24h</th><th>Last check</th><th><span class="muted">Actions</span></th></tr></thead>
+    <tbody>
+    {{range .Rows}}
+      <tr>
+        <td>{{template "status" .Last}}</td>
+        <td class="url"><a href="/monitors/{{.Monitor.ID}}">{{.Monitor.URL}}</a></td>
+        <td class="num">{{if .Day.Checks}}{{printf "%.1f" .Day.UptimePercent}}%{{else}}<span class="muted">–</span>{{end}}</td>
+        <td class="num">{{if .Day.Checks}}{{printf "%.0f" .Day.AvgLatencyMS}} ms{{else}}<span class="muted">–</span>{{end}}</td>
+        <td class="muted">{{with .Last}}{{ago .CheckedAt}}{{else}}never{{end}}</td>
+        <td>
+          <form method="post" action="/monitors/{{.Monitor.ID}}/delete" onsubmit="return confirm('Delete this monitor and all its results?')">
+            <button class="danger" type="submit" aria-label="Delete {{.Monitor.URL}}">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+{{else}}
+  <p class="empty muted">No monitors yet. Add a URL above and the checker will pick it up on its next round.</p>
+{{end}}
+</div>
+<p class="muted">Refreshes every 30 seconds.</p>
+{{end}}

@@ -1,0 +1,51 @@
+{{define "content"}}
+<p><a href="/">← All monitors</a></p>
+{{if .Monitor.ID}}
+<div class="row">
+  <h1>{{.Monitor.URL}}</h1>
+  <form method="post" action="/monitors/{{.Monitor.ID}}/delete" onsubmit="return confirm('Delete this monitor and all its results?')">
+    <button class="danger" type="submit">Delete monitor</button>
+  </form>
+</div>
+<p class="muted">
+  {{if .Results}}{{template "status" index .Results 0}} · last checked {{ago (index .Results 0).CheckedAt}}{{else}}<span class="pill wait">Pending</span>{{end}}
+  · <a href="{{.Monitor.URL}}" rel="noopener noreferrer" target="_blank">open site</a>
+</p>
+
+<div class="cards">
+  <div class="card stat"><span class="muted">Uptime 24h</span><b>{{if .Day.Checks}}{{printf "%.2f" .Day.UptimePercent}}%{{else}}–{{end}}</b></div>
+  <div class="card stat"><span class="muted">Uptime 7d</span><b>{{if .Week.Checks}}{{printf "%.2f" .Week.UptimePercent}}%{{else}}–{{end}}</b></div>
+  <div class="card stat"><span class="muted">Avg latency 24h</span><b>{{if .Day.Checks}}{{printf "%.0f" .Day.AvgLatencyMS}} ms{{else}}–{{end}}</b></div>
+  <div class="card stat"><span class="muted">Checks 24h</span><b>{{.Day.Checks}}</b></div>
+</div>
+
+{{if .Strip}}
+<h2>Last {{len .Strip}} checks <span class="muted">(oldest → newest)</span></h2>
+<div class="card strip" role="img" aria-label="{{.Day.UpChecks}} of {{.Day.Checks}} checks up in the last 24 hours">
+  {{range .Strip}}<span class="{{if .Up}}up{{else}}down{{end}}" title="{{.CheckedAt.Format "Jan 2 15:04:05"}}: {{if .Up}}up{{else}}down{{end}}"></span>{{end}}
+</div>
+{{end}}
+
+<h2>Recent checks</h2>
+<div class="card table-wrap">
+{{if .Results}}
+  <table>
+    <thead><tr><th>Time</th><th>Status</th><th>HTTP</th><th>Latency</th><th>Error</th></tr></thead>
+    <tbody>
+    {{range .Results}}
+      <tr>
+        <td class="num">{{.CheckedAt.Format "Jan 2 15:04:05"}}</td>
+        <td>{{template "status" .}}</td>
+        <td class="num">{{with .StatusCode}}{{.}}{{else}}<span class="muted">–</span>{{end}}</td>
+        <td class="num">{{.LatencyMS}} ms</td>
+        <td class="url muted">{{with .Error}}{{.}}{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+{{else}}
+  <p class="empty muted">No checks yet. The checker will run this monitor on its next round.</p>
+{{end}}
+</div>
+{{end}}
+{{end}}
